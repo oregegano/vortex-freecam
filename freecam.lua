@@ -1,10 +1,8 @@
 local players = game:GetService("Players")
 local runService = game:GetService("RunService")
 local userInputService = game:GetService("UserInputService")
-
 local player = players.LocalPlayer
 local camera = workspace.CurrentCamera
-
 local toggleKey = Enum.KeyCode.G
 local defaultSpeed = 45
 local speed1 = 5
@@ -12,22 +10,29 @@ local speed2 = 250
 local scrollStep = 6
 local boostMult = 2.5
 local sensitivity = 0.004
-
+local posSmoothness = 7
+local rotSmoothness = 11
 local moveSpeed = defaultSpeed
 local active = false
 local renderConn: RBXScriptConnection? = nil
 local groundConn: RBXScriptConnection? = nil
-
-local camCFrame: CFrame = CFrame.identity
+local targetPos: Vector3 = Vector3.zero
+local currentPos: Vector3 = Vector3.zero
+local targetYaw = 0
+local targetPitch = 0
 local yaw = 0
 local pitch = 0
 local lastMousePos: Vector2? = nil
-
 local oldCamType: Enum.CameraType? = nil
 local oldMouseMode: Enum.MouseBehavior? = nil
-
 local hiddenParts: { [BasePart]: { Transparency: number, LocalTransparencyModifier: number? } } = {}
 local hiddenDecals: { [Instance]: number } = {}
+local function dampFactor(rate: number, dt: number): number
+	if rate <= 0 then
+		return 1
+	end
+	return 1 - math.exp(-rate * dt)
+end
 
 local function getLocalMod(part: BasePart): number?
 	local ok, val = pcall(function()
@@ -38,7 +43,6 @@ local function getLocalMod(part: BasePart): number?
 	end
 	return nil
 end
-
 local function setLocalMod(part: BasePart, val: number)
 	pcall(function()
 		(part :: any).LocalTransparencyModifier = val
@@ -53,7 +57,6 @@ local savedChar = {
 	jumpPower = 50,
 	jumpHeight = 7.2,
 }
-
 local function hideCharacter()
 	table.clear(hiddenParts)
 	table.clear(hiddenDecals)
@@ -75,7 +78,6 @@ local function hideCharacter()
 		end
 	end
 end
-
 local function showCharacter()
 	for part, state in pairs(hiddenParts) do
 		if part and part.Parent then
@@ -117,7 +119,6 @@ local function captureCharState()
 		jumpHeight = jh,
 	}
 end
-
 local function applyFreezeNow(hum: Humanoid?, root: BasePart?)
 	if hum then
 		hum.WalkSpeed = 0
@@ -141,7 +142,6 @@ local function applyFreezeNow(hum: Humanoid?, root: BasePart?)
 		root.Anchored = true
 	end
 end
-
 local function isOnSurface(hum: Humanoid): boolean
 	local mat = Enum.Material.Plastic
 	pcall(function()
@@ -156,7 +156,6 @@ local function isOnSurface(hum: Humanoid): boolean
 	end)
 	return state == Enum.HumanoidStateType.Running or state == Enum.HumanoidStateType.Landed
 end
-
 local function freezeWhenGrounded()
 	if groundConn then
 		groundConn:Disconnect()
@@ -209,7 +208,6 @@ local function freezeWhenGrounded()
 		end
 	end)
 end
-
 local function unfreezePlayer()
 	if groundConn then
 		groundConn:Disconnect()
@@ -250,7 +248,6 @@ local function unfreezePlayer()
 	savedChar.root = nil
 	savedChar.hum = nil
 end
-
 local function lockMouseCenter()
 	pcall(function()
 		userInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
@@ -270,8 +267,13 @@ local function setFreecam(enabled: boolean)
 		camera.CameraType = Enum.CameraType.Scriptable
 		lockMouseCenter()
 
-		camCFrame = camera.CFrame
-		local _, yRot, xRot = camCFrame:ToEulerAnglesYXZ()
+		local startCF = camera.CFrame
+		targetPos = startCF.Position
+		currentPos = startCF.Position
+
+		local _, yRot, xRot = startCF:ToEulerAnglesYXZ()
+		targetYaw = yRot
+		targetPitch = xRot
 		yaw = yRot
 		pitch = xRot
 		lastMousePos = userInputService:GetMouseLocation()
@@ -297,17 +299,21 @@ local function setFreecam(enabled: boolean)
 
 			if userInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
 				local delta = userInputService:GetMouseDelta()
-				yaw -= delta.X * sensitivity
-				pitch = math.clamp(pitch - delta.Y * sensitivity, math.rad(-85), math.rad(85))
+				targetYaw -= delta.X * sensitivity
+				targetPitch = math.clamp(targetPitch - delta.Y * sensitivity, math.rad(-85), math.rad(85))
 			else
 				local curMouse = userInputService:GetMouseLocation()
 				if lastMousePos then
 					local delta = curMouse - lastMousePos
-					yaw -= delta.X * sensitivity
-					pitch = math.clamp(pitch - delta.Y * sensitivity, math.rad(-85), math.rad(85))
+					targetYaw -= delta.X * sensitivity
+					targetPitch = math.clamp(targetPitch - delta.Y * sensitivity, math.rad(-85), math.rad(85))
 				end
 				lastMousePos = curMouse
 			end
+
+			local rotAlpha = dampFactor(rotSmoothness, dt)
+			yaw += (targetYaw - yaw) * rotAlpha
+			pitch += (targetPitch - pitch) * rotAlpha
 
 			local rot = CFrame.fromEulerAnglesYXZ(pitch, yaw, 0)
 			local dir = Vector3.zero
@@ -325,13 +331,14 @@ local function setFreecam(enabled: boolean)
 				if userInputService:IsKeyDown(Enum.KeyCode.LeftShift) or userInputService:IsKeyDown(Enum.KeyCode.RightShift) then
 					curSpeed *= boostMult
 				end
-				camCFrame = CFrame.new(camCFrame.Position + dir * curSpeed * dt) * rot
-			else
-				camCFrame = CFrame.new(camCFrame.Position) * rot
+				targetPos += dir * curSpeed * dt
 			end
 
+			local posAlpha = dampFactor(posSmoothness, dt)
+			currentPos = currentPos:Lerp(targetPos, posAlpha)
+
 			camera.CameraType = Enum.CameraType.Scriptable
-			camera.CFrame = camCFrame
+			camera.CFrame = CFrame.new(currentPos) * rot
 		end)
 	else
 		if not active then return end
@@ -358,21 +365,18 @@ local function setFreecam(enabled: boolean)
 		unfreezePlayer()
 	end
 end
-
 userInputService.InputChanged:Connect(function(input: InputObject, _gp: boolean)
 	if not active then return end
 	if input.UserInputType == Enum.UserInputType.MouseWheel then
 		moveSpeed = math.clamp(moveSpeed + (input.Position.Z * scrollStep), speed1, speed2)
 	end
 end)
-
 userInputService.InputBegan:Connect(function(input: InputObject, gp: boolean)
 	if gp then return end
 	if input.KeyCode == toggleKey then
 		setFreecam(not active)
 	end
 end)
-
 player.CharacterRemoving:Connect(function()
 	table.clear(hiddenParts)
 	table.clear(hiddenDecals)
